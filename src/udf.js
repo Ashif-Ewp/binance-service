@@ -47,12 +47,7 @@ class UDF {
         this.loadSymbols();
       }, 1000);
     });
-
     this.symbols = promise.then((info) => {
-      if (!info || !info.symbols) {
-        throw new Error("Symbols information is missing from the response.");
-      }
-
       return info.symbols.map((symbol) => {
         return {
           symbol: symbol.symbol,
@@ -79,12 +74,7 @@ class UDF {
         };
       });
     });
-
     this.allSymbols = promise.then((info) => {
-      if (!info || !info.symbols) {
-        throw new Error("Symbols information is missing from the response.");
-      }
-
       let set = new Set();
       for (const symbol of info.symbols) {
         set.add(symbol.symbol);

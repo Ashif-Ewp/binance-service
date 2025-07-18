@@ -2,11 +2,11 @@
   "name": "tradingview-udf-binance-node",
   "version": "0.2.0",
   "description": "Sample implementation of TradingView Charting Library UDF-compatible data source for Binance exchange",
-  "main": "./src/app.js",
+  "main": "src/app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon ./src/app.js",
-    "start": "node ./src/app.js"
+    "dev": "nodemon src/app.js",
+    "start": "node src/app.js"
   },
   "repository": {
     "type": "git",

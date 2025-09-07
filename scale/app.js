@@ -146,11 +146,9 @@ if (cluster.isMaster) {
     console.error(err);
     res.status(500).send({ s: "error", errmsg: "Internal Error" });
   });
-
-  const server = app.listen(process.env.PORT || 8081, () => {
-    console.log(
-      `Worker ${process.pid} listening on port ${server.address().port}`
-    );
+  const PORT = process.env.PORT || 8081;
+  const server = app.listen(PORT, () => {
+    console.log(`Worker ${process.pid} listening on port ${PORT}`);
   });
 
   const wss = new WebSocket.Server({ server });

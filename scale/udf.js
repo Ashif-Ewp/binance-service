@@ -5,16 +5,8 @@ const Redis = require("ioredis");
 const Bottleneck = require("bottleneck");
 
 const redis = new Redis({
-  host: "127.0.0.1" || "localhost",
-  port: 6379,
-  password: "my_master_password",
-});
-redis.on("connect", () => {
-  console.log("✅ Redis connected");
-});
-
-redis.on("error", (err) => {
-  console.error("❌ Redis error:", err);
+  host: process.env.REDIS_HOST || "localhost",
+  port: process.env.REDIS_PORT || 6379,
 });
 const limiter = new Bottleneck({ maxConcurrent: 10, minTime: 50 });
 
@@ -67,9 +59,34 @@ class UDF {
     this.binanceWs = null;
     this.subscriptions = new Set();
     this.connectBinanceWS();
+    this.preloadKlines();
 
     setInterval(() => this.loadSymbols(), 30000);
     this.loadSymbols();
+  }
+
+  async preloadKlines() {
+    const popularPairs = ["BTCUSDT", "ETHUSDT", "BNBUSDT"];
+    const intervals = ["1m", "5m", "1h"];
+    for (const symbol of popularPairs) {
+      for (const interval of intervals) {
+        try {
+          const klines = await limiter.schedule(() =>
+            this.binance.klines(
+              symbol,
+              interval,
+              Date.now() - 24 * 3600 * 1000,
+              Date.now(),
+              500
+            )
+          );
+          const key = `kline:${symbol}@${interval}:recent`;
+          await redis.setex(key, 3600, JSON.stringify(klines));
+        } catch (err) {
+          console.error(`Preload error for ${symbol}@${interval}:`, err);
+        }
+      }
+    }
   }
 
   async connectBinanceWS() {
@@ -105,13 +122,14 @@ class UDF {
 
     this.binanceWs.on("message", async (data) => {
       const msg = JSON.parse(data.toString());
-      if (msg.id) {
-        if (msg.result !== null)
-          console.error(
-            `Worker ${process.pid}: Binance subscription failed:`,
-            msg
-          );
-      } else if (msg.e === "kline") {
+      if (msg.id && msg.result !== null) {
+        console.error(
+          `Worker ${process.pid}: Binance subscription failed:`,
+          msg
+        );
+        return;
+      }
+      if (msg.e === "kline") {
         const k = msg.k;
         const key = `${k.s}@${this.intervalMap[k.i] || k.i}`;
         const bar = {
@@ -126,9 +144,9 @@ class UDF {
         await redis.setex(`kline:${key}`, 3600, JSON.stringify(bar));
 
         const subscribers = this.subscribers.get(key) || [];
-        for (const callback of subscribers) {
-          callback(bar);
-        }
+        setImmediate(() => {
+          for (const callback of subscribers) callback(bar);
+        });
 
         if (k.x) {
           const nextTime = k.T + 1;
@@ -160,6 +178,42 @@ class UDF {
     ws._callbacks.push(onTick);
 
     const stream = `${symbol.toLowerCase()}@kline_${interval}`;
+    if (this.subscriptions.size >= 300) {
+      console.warn(
+        `Worker ${process.pid}: Stream limit reached, using HTTP polling`
+      );
+      setInterval(async () => {
+        try {
+          const klines = await limiter.schedule(() =>
+            this.binance.klines(
+              symbol,
+              interval,
+              Date.now() - 60000,
+              Date.now(),
+              1
+            )
+          );
+          if (klines.length > 0) {
+            const bar = {
+              time: Math.floor(klines[0][0] / 1000),
+              open: parseFloat(klines[0][1]),
+              high: parseFloat(klines[0][2]),
+              low: parseFloat(klines[0][3]),
+              close: parseFloat(klines[0][4]),
+              volume: parseFloat(klines[0][5]),
+            };
+            this.latestKlines.set(key, bar);
+            await redis.setex(`kline:${key}`, 3600, JSON.stringify(bar));
+            const subscribers = this.subscribers.get(key) || [];
+            for (const callback of subscribers) callback(bar);
+          }
+        } catch (err) {
+          console.error(`Polling error for ${key}:`, err);
+        }
+      }, 5000);
+      return;
+    }
+
     if (!this.subscriptions.has(stream)) {
       this.subscriptions.add(stream);
       await redis.sadd("binance:subscriptions", stream);
@@ -352,6 +406,10 @@ class UDF {
   }
 
   async history(symbol, from, to, resolution) {
+    const cacheKey = `udf:history:${symbol}:${from}:${to}:${resolution}`;
+    const cached = await redis.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+
     const hasSymbol = await this.checkSymbol(symbol);
     if (!hasSymbol) throw new SymbolNotFound();
 
@@ -376,7 +434,7 @@ class UDF {
     await fetchKlines();
 
     if (totalKlines.length === 0) return { s: "no_data" };
-    return {
+    const result = {
       s: "ok",
       t: totalKlines.map((b) => Math.floor(b[0] / 1000)),
       c: totalKlines.map((b) => parseFloat(b[4])),
@@ -385,6 +443,8 @@ class UDF {
       l: totalKlines.map((b) => parseFloat(b[3])),
       v: totalKlines.map((b) => parseFloat(b[5])),
     };
+    await redis.setex(cacheKey, 300, JSON.stringify(result));
+    return result;
   }
 }
 
@@ -393,3 +453,399 @@ UDF.SymbolNotFound = SymbolNotFound;
 UDF.InvalidResolution = InvalidResolution;
 
 module.exports = UDF;
+
+// // /home/ashif/chart_raiders/binance-service/scale/udf.js
+// const Binance = require("./binance");
+// const WebSocket = require("ws");
+// const Redis = require("ioredis");
+// const Bottleneck = require("bottleneck");
+
+// const redis = new Redis({
+//   host: "127.0.0.1" || "localhost",
+//   port: 6379,
+//   password: "my_master_password",
+// });
+// redis.on("connect", () => {
+//   console.log("✅ Redis connected");
+// });
+
+// redis.on("error", (err) => {
+//   console.error("❌ Redis error:", err);
+// });
+// const limiter = new Bottleneck({ maxConcurrent: 10, minTime: 50 });
+
+// class UDFError extends Error {}
+// class SymbolNotFound extends UDFError {}
+// class InvalidResolution extends UDFError {}
+
+// class UDF {
+//   constructor() {
+//     this.binance = new Binance();
+//     this.supportedResolutions = [
+//       "1",
+//       "3",
+//       "5",
+//       "15",
+//       "30",
+//       "60",
+//       "120",
+//       "240",
+//       "360",
+//       "480",
+//       "720",
+//       "1D",
+//       "3D",
+//       "1W",
+//       "1M",
+//     ];
+//     this.intervalMap = {
+//       1: "1m",
+//       3: "3m",
+//       5: "5m",
+//       15: "15m",
+//       30: "30m",
+//       60: "1h",
+//       120: "2h",
+//       240: "4h",
+//       360: "6h",
+//       480: "8h",
+//       720: "12h",
+//       D: "1d",
+//       "1D": "1d",
+//       "3D": "3d",
+//       W: "1w",
+//       "1W": "1w",
+//       M: "1M",
+//       "1M": "1M",
+//     };
+//     this.subscribers = new Map();
+//     this.latestKlines = new Map();
+//     this.binanceWs = null;
+//     this.subscriptions = new Set();
+//     this.connectBinanceWS();
+
+//     setInterval(() => this.loadSymbols(), 30000);
+//     this.loadSymbols();
+//   }
+
+//   async connectBinanceWS() {
+//     if (this.binanceWs) return;
+//     this.binanceWs = new WebSocket("wss://fstream.binance.com/ws");
+
+//     this.binanceWs.on("open", async () => {
+//       console.log(`Worker ${process.pid}: Binance WebSocket connected`);
+//       const streams = (await redis.smembers("binance:subscriptions")) || [];
+//       for (const stream of streams) {
+//         this.subscriptions.add(stream);
+//         this.binanceWs.send(
+//           JSON.stringify({
+//             method: "SUBSCRIBE",
+//             params: [stream],
+//             id: Date.now(),
+//           })
+//         );
+//       }
+//     });
+
+//     this.binanceWs.on("close", () => {
+//       console.log(
+//         `Worker ${process.pid}: Binance WebSocket closed, reconnecting...`
+//       );
+//       this.binanceWs = null;
+//       setTimeout(() => this.connectBinanceWS(), 1000);
+//     });
+
+//     this.binanceWs.on("error", (err) => {
+//       console.error(`Worker ${process.pid}: Binance WebSocket error:`, err);
+//     });
+
+//     this.binanceWs.on("message", async (data) => {
+//       const msg = JSON.parse(data.toString());
+//       if (msg.id) {
+//         if (msg.result !== null)
+//           console.error(
+//             `Worker ${process.pid}: Binance subscription failed:`,
+//             msg
+//           );
+//       } else if (msg.e === "kline") {
+//         const k = msg.k;
+//         const key = `${k.s}@${this.intervalMap[k.i] || k.i}`;
+//         const bar = {
+//           time: Math.floor(k.t / 1000),
+//           open: parseFloat(k.o),
+//           high: parseFloat(k.h),
+//           low: parseFloat(k.l),
+//           close: parseFloat(k.c),
+//           volume: parseFloat(k.v),
+//         };
+//         this.latestKlines.set(key, bar);
+//         await redis.setex(`kline:${key}`, 3600, JSON.stringify(bar));
+
+//         const subscribers = this.subscribers.get(key) || [];
+//         for (const callback of subscribers) {
+//           callback(bar);
+//         }
+
+//         if (k.x) {
+//           const nextTime = k.T + 1;
+//           const nextBar = {
+//             time: Math.floor(nextTime / 1000),
+//             open: parseFloat(k.c),
+//             high: parseFloat(k.c),
+//             low: parseFloat(k.c),
+//             close: parseFloat(k.c),
+//             volume: 0,
+//           };
+//           this.latestKlines.set(key, nextBar);
+//           await redis.setex(`kline:${key}`, 3600, JSON.stringify(nextBar));
+//         }
+//       }
+//     });
+//   }
+
+//   async subscribeBars(symbol, resolution, onTick, ws) {
+//     const interval = this.intervalMap[resolution];
+//     if (!interval) {
+//       console.error(`Worker ${process.pid}: Invalid resolution: ${resolution}`);
+//       return;
+//     }
+//     const key = `${symbol}@${interval}`;
+//     if (!this.subscribers.has(key)) this.subscribers.set(key, []);
+//     this.subscribers.get(key).push(onTick);
+//     ws._callbacks = ws._callbacks || [];
+//     ws._callbacks.push(onTick);
+
+//     const stream = `${symbol.toLowerCase()}@kline_${interval}`;
+//     if (!this.subscriptions.has(stream)) {
+//       this.subscriptions.add(stream);
+//       await redis.sadd("binance:subscriptions", stream);
+//       if (this.binanceWs && this.binanceWs.readyState === WebSocket.OPEN) {
+//         this.binanceWs.send(
+//           JSON.stringify({
+//             method: "SUBSCRIBE",
+//             params: [stream],
+//             id: Date.now(),
+//           })
+//         );
+//       }
+//     }
+
+//     const cached = await redis.get(`kline:${key}`);
+//     if (cached) {
+//       onTick(JSON.parse(cached));
+//     } else {
+//       const klines = await limiter.schedule(() =>
+//         this.binance.klines(
+//           symbol,
+//           interval,
+//           Date.now() - 60000 * 60,
+//           Date.now(),
+//           1
+//         )
+//       );
+//       if (klines && klines.length > 0) {
+//         const b = klines[0];
+//         const bar = {
+//           time: Math.floor(b[0] / 1000),
+//           open: parseFloat(b[1]),
+//           high: parseFloat(b[2]),
+//           low: parseFloat(b[3]),
+//           close: parseFloat(b[4]),
+//           volume: parseFloat(b[5]),
+//         };
+//         this.latestKlines.set(key, bar);
+//         await redis.setex(`kline:${key}`, 3600, JSON.stringify(bar));
+//         onTick(bar);
+//       }
+//     }
+//   }
+
+//   async unsubscribeBars(ws) {
+//     for (const [key, callbacks] of this.subscribers.entries()) {
+//       const newCallbacks = callbacks.filter(
+//         (cb) => !ws._callbacks?.includes(cb)
+//       );
+//       this.subscribers.set(key, newCallbacks);
+//       if (newCallbacks.length === 0) {
+//         this.subscribers.delete(key);
+//         const [symbol, interval] = key.split("@");
+//         const stream = `${symbol.toLowerCase()}@kline_${interval}`;
+//         this.subscriptions.delete(stream);
+//         await redis.srem("binance:subscriptions", stream);
+//         if (this.binanceWs && this.binanceWs.readyState === WebSocket.OPEN) {
+//           this.binanceWs.send(
+//             JSON.stringify({
+//               method: "UNSUBSCRIBE",
+//               params: [stream],
+//               id: Date.now(),
+//             })
+//           );
+//         }
+//       }
+//     }
+//   }
+
+//   loadSymbols() {
+//     function pricescale(symbol) {
+//       for (let filter of symbol.filters) {
+//         if (filter.filterType == "PRICE_FILTER") {
+//           return Math.round(1 / parseFloat(filter.tickSize));
+//         }
+//       }
+//       return 1;
+//     }
+
+//     const promise = limiter
+//       .schedule(() => this.binance.exchangeInfo())
+//       .catch((err) => {
+//         console.error(`Worker ${process.pid}:`, err);
+//         setTimeout(() => this.loadSymbols(), 1000);
+//       });
+//     this.symbols = promise.then((info) => {
+//       const symbols = info.symbols.map((symbol) => ({
+//         symbol: symbol.symbol,
+//         ticker: symbol.symbol,
+//         name: symbol.symbol,
+//         full_name: symbol.symbol,
+//         description: `${symbol.baseAsset} / ${symbol.quoteAsset}`,
+//         exchange: "BINANCE",
+//         listed_exchange: "BINANCE",
+//         type: "crypto",
+//         currency_code: symbol.quoteAsset,
+//         session: "24x7",
+//         timezone: "UTC",
+//         minmovement: 1,
+//         minmov: 1,
+//         minmovement2: 0,
+//         minmov2: 0,
+//         pricescale: pricescale(symbol),
+//         supported_resolutions: this.supportedResolutions,
+//         has_intraday: true,
+//         has_daily: true,
+//         has_weekly_and_monthly: true,
+//         data_status: "streaming",
+//       }));
+//       redis.setex("udf:symbols", 3600, JSON.stringify(symbols));
+//       return symbols;
+//     });
+//     this.allSymbols = promise.then((info) => {
+//       let set = new Set();
+//       for (const symbol of info.symbols) {
+//         set.add(symbol.symbol);
+//       }
+//       return set;
+//     });
+//   }
+
+//   async checkSymbol(symbol) {
+//     const symbols = await this.allSymbols;
+//     return symbols.has(symbol);
+//   }
+
+//   asTable(items) {
+//     let result = {};
+//     for (const item of items) {
+//       for (const key in item) {
+//         if (!result[key]) result[key] = [];
+//         result[key].push(item[key]);
+//       }
+//     }
+//     for (const key in result) {
+//       const values = [...new Set(result[key])];
+//       if (values.length === 1) result[key] = values[0];
+//     }
+//     return result;
+//   }
+
+//   async config() {
+//     return {
+//       exchanges: [
+//         { value: "BINANCE", name: "Binance", desc: "Binance Exchange" },
+//       ],
+//       symbols_types: [{ value: "crypto", name: "Cryptocurrency" }],
+//       supported_resolutions: this.supportedResolutions,
+//       supports_search: true,
+//       supports_group_request: false,
+//       supports_marks: false,
+//       supports_timescale_marks: false,
+//       supports_time: true,
+//       supports_realtime: true,
+//     };
+//   }
+
+//   async symbolInfo() {
+//     const cached = await redis.get("udf:symbols");
+//     if (cached) return this.asTable(JSON.parse(cached));
+//     const symbols = await this.symbols;
+//     return this.asTable(symbols);
+//   }
+
+//   async symbol(symbol) {
+//     const symbols = await this.symbols;
+//     const comps = symbol.split(":");
+//     const s = (comps.length > 1 ? comps[1] : symbol).toUpperCase();
+//     for (const symbol of symbols) {
+//       if (symbol.symbol === s) return symbol;
+//     }
+//     throw new SymbolNotFound();
+//   }
+
+//   async search(query, type, exchange, limit) {
+//     let symbols = await this.symbols;
+//     if (type) symbols = symbols.filter((s) => s.type === type);
+//     if (exchange) symbols = symbols.filter((s) => s.exchange === exchange);
+//     query = query.toUpperCase();
+//     symbols = symbols.filter((s) => s.symbol.indexOf(query) >= 0);
+//     if (limit) symbols = symbols.slice(0, limit);
+//     return symbols.map((s) => ({
+//       symbol: s.symbol,
+//       full_name: s.full_name,
+//       description: s.description,
+//       exchange: s.exchange,
+//       ticker: s.ticker,
+//       type: s.type,
+//     }));
+//   }
+
+//   async history(symbol, from, to, resolution) {
+//     const hasSymbol = await this.checkSymbol(symbol);
+//     if (!hasSymbol) throw new SymbolNotFound();
+
+//     const interval = this.intervalMap[resolution];
+//     if (!interval) throw new InvalidResolution();
+
+//     from = Number(from) * 1000;
+//     to = Number(to) * 1000;
+//     let totalKlines = [];
+//     let startTime = from;
+
+//     const fetchKlines = async () => {
+//       const klines = await limiter.schedule(() =>
+//         this.binance.klines(symbol, interval, startTime, to, 500)
+//       );
+//       totalKlines = totalKlines.concat(klines);
+//       if (klines.length === 500) {
+//         startTime = klines[klines.length - 1][0] + 1;
+//         await fetchKlines();
+//       }
+//     };
+//     await fetchKlines();
+
+//     if (totalKlines.length === 0) return { s: "no_data" };
+//     return {
+//       s: "ok",
+//       t: totalKlines.map((b) => Math.floor(b[0] / 1000)),
+//       c: totalKlines.map((b) => parseFloat(b[4])),
+//       o: totalKlines.map((b) => parseFloat(b[1])),
+//       h: totalKlines.map((b) => parseFloat(b[2])),
+//       l: totalKlines.map((b) => parseFloat(b[3])),
+//       v: totalKlines.map((b) => parseFloat(b[5])),
+//     };
+//   }
+// }
+
+// UDF.Error = UDFError;
+// UDF.SymbolNotFound = SymbolNotFound;
+// UDF.InvalidResolution = InvalidResolution;
+
+// module.exports = UDF;

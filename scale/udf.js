@@ -3,10 +3,10 @@ const Binance = require("./binance");
 const WebSocket = require("ws");
 const Redis = require("ioredis");
 const Bottleneck = require("bottleneck");
-
 const redis = new Redis({
-  host: process.env.REDIS_HOST || "localhost",
-  port: process.env.REDIS_PORT || 6379,
+  host: "127.0.0.1" || "localhost",
+  port: 6379,
+  password: "my_master_password",
 });
 const limiter = new Bottleneck({ maxConcurrent: 10, minTime: 50 });
 

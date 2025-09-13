@@ -386,7 +386,7 @@ if (cluster.isMaster) {
                   bar.close !== state.lastSavedPrice
                 ) {
                   redisV1
-                    .set(`symbol:${symbol}`, bar.close)
+                    .set(`price:${symbol}`, bar.close)
                     .catch((err) => console.error("Redis set error:", err));
 
                   state.lastSavedPrice = bar.close;

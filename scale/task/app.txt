@@ -198,8 +198,6 @@ const cors = require("cors");
 const morgan = require("morgan");
 const UDF = require("./udf");
 const query = require("./query");
-const redisConfig = require("./config/redisConfig");
-const redisV1 = redisConfig.getInstance();
 
 if (cluster.isMaster) {
   console.log(`👑 Master ${process.pid} is running`);
@@ -355,7 +353,6 @@ if (cluster.isMaster) {
   });
 
   const wss = new WebSocket.Server({ server });
-  const symbolState = {};
 
   wss.on("connection", (ws) => {
     console.log(`🔌 Worker ${process.pid}: WebSocket client connected`);
@@ -365,46 +362,16 @@ if (cluster.isMaster) {
         const data = JSON.parse(message.toString());
         console.log(`📩 WS Message:`, data);
 
-        if (data?.type === "subscribeBars") {
+        if (data.type === "subscribeBars") {
           const { symbol, resolution } = data;
-          // ✅ Forward proper ms timestamps
+
+          // ✅ Properly subscribe with callback
           udf.subscribeBars(
             symbol,
             resolution,
-            async (bar) => {
+            (bar) => {
               if (ws.readyState === WebSocket.OPEN) {
-                const now = Date.now();
-                if (!symbolState[symbol]) {
-                  symbolState[symbol] = {
-                    lastRedisUpdate: 0,
-                    lastSavedPrice: null,
-                  };
-                }
-                const state = symbolState[symbol];
-                if (
-                  now - state.lastRedisUpdate > 1000 ||
-                  bar.close !== state.lastSavedPrice
-                ) {
-                  redisV1
-                    .set(`symbol:${symbol}`, bar.close)
-                    .catch((err) => console.error("Redis set error:", err));
-
-                  state.lastSavedPrice = bar.close;
-                  state.lastRedisUpdate = now;
-                }
-                ws.send(
-                  JSON.stringify({
-                    type: "bar",
-                    data: {
-                      time: bar.time * 1000, // ✅ ensure milliseconds
-                      open: bar.open,
-                      high: bar.high,
-                      low: bar.low,
-                      close: bar.close,
-                      volume: bar.volume,
-                    },
-                  })
-                );
+                ws.send(JSON.stringify({ type: "bar", data: bar }));
               }
             },
             ws

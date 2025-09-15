@@ -392,11 +392,28 @@ if (cluster.isMaster) {
                   state.lastSavedPrice = bar.close;
                   state.lastRedisUpdate = now;
                 }
+
+                // ws.send(
+                //   JSON.stringify({
+                //     type: "bar",
+                //     data: {
+                //       time: bar.time * 1000, // ✅ ensure milliseconds
+                //       open: bar.open,
+                //       high: bar.high,
+                //       low: bar.low,
+                //       close: bar.close,
+                //       volume: bar.volume,
+                //     },
+                //   })
+                // );
+
                 ws.send(
                   JSON.stringify({
                     type: "bar",
+                    symbol, // ✅ NEW: echo back the subscription symbol
+                    resolution, // ✅ NEW: echo back the subscription resolution (e.g. "1","5","60","1D")
                     data: {
-                      time: bar.time * 1000, // ✅ ensure milliseconds
+                      time: bar.time * 1000, // ✅ ms for TradingView realtime callback
                       open: bar.open,
                       high: bar.high,
                       low: bar.low,
